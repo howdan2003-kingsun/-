@@ -1,0 +1,9 @@
+{
+  "name": "拍照排行程",
+  "short_name": "拍照排行程",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f7f5f2",
+  "theme_color": "#c96442",
+  "lang": "zh-Hant"
+}

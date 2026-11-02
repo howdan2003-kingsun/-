@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="拍照排行程">
+<meta name="theme-color" content="#c96442">
+<link rel="manifest" href="manifest.json">
+<title>拍照排行程</title>
+<style>
+  :root {
+    --bg: #f7f5f2; --card: #ffffff; --text: #1f1d1a; --muted: #6b665e;
+    --line: #e4dfd8; --accent: #c96442; --accent-text: #ffffff; --danger: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1918; --card: #262422; --text: #f2efea; --muted: #a39d94;
+      --line: #3a3734; --accent: #d97757; --accent-text: #1a1918; --danger: #f2b8b5;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 17px/1.5 -apple-system, "PingFang TC", "Noto Sans TC", system-ui, sans-serif;
+    padding: env(safe-area-inset-top) 16px calc(32px + env(safe-area-inset-bottom));
+  }
+  main { max-width: 560px; margin: 0 auto; }
+  h1 { font-size: 26px; margin: 20px 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px; margin-bottom: 16px; }
+  button, .btn {
+    display: block; width: 100%; border: 0; border-radius: 12px; padding: 14px;
+    font: inherit; font-weight: 600; text-align: center; text-decoration: none; cursor: pointer;
+    background: var(--accent); color: var(--accent-text);
+  }
+  .btn.secondary, button.secondary { background: transparent; color: var(--text); border: 1px solid var(--line); }
+  button:disabled { opacity: .5; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; min-width: 0; }
+  label { display: block; font-size: 14px; color: var(--muted); margin: 10px 0 4px; }
+  input, textarea {
+    width: 100%; min-width: 0; -webkit-appearance: none; font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px;
+  }
+  textarea { min-height: 90px; resize: vertical; }
+  input[type=checkbox] { width: auto; }
+  .check { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 16px; }
+  #preview { width: 100%; border-radius: 12px; margin-top: 12px; display: none; }
+  #status { color: var(--muted); margin: 12px 0 0; min-height: 1.5em; }
+  #status.error { color: var(--danger); }
+  .event h2 { font-size: 18px; margin: 0 0 4px; }
+  .actions { display: grid; gap: 8px; margin-top: 14px; }
+  details summary { cursor: pointer; color: var(--muted); }
+  .hint { font-size: 14px; color: var(--muted); }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>拍照排行程</h1>
+  <p class="sub">拍下單據、通知或預約卡，自動讀出日期，加進日曆並設好提醒。</p>
+
+  <section class="card" id="keyCard">
+    <details id="keyDetails">
+      <summary>設定 API 金鑰</summary>
+      <label for="apiKey">Anthropic API 金鑰（只存在這支手機上）</label>
+      <input id="apiKey" type="password" autocomplete="off" placeholder="sk-ant-...">
+      <p class="hint">到 console.anthropic.com → API Keys 建立。不要把金鑰給別人。</p>
+      <button id="saveKey" class="secondary">儲存</button>
+    </details>
+  </section>
+
+  <section class="card">
+    <input id="photo" type="file" accept="image/*" class="hidden">
+    <div class="row">
+      <button id="takePhoto">📷 拍照／選照片</button>
+    </div>
+    <img id="preview" alt="照片預覽">
+    <p id="status"></p>
+  </section>
+
+  <section id="results"></section>
+  <section id="allActions" class="hidden">
+    <button id="downloadAll">全部加入 iPhone 日曆（.ics）</button>
+  </section>
+</main>
+
+<script>
+const MODEL = "claude-opus-5-5";
+const $ = (id) => document.getElementById(id);
+
+// ---------- 金鑰 ----------
+function getKey() { try { return localStorage.getItem("anthropicKey") || ""; } catch { return ""; } }
+function setKey(k) { try { localStorage.setItem("anthropicKey", k); } catch {} }
+$("apiKey").value = getKey();
+if (!getKey()) $("keyDetails").open = true;
+$("saveKey").onclick = () => {
+  setKey($("apiKey").value.trim());
+  $("keyDetails").open = false;
+  setStatus(getKey() ? "金鑰已儲存。" : "金鑰已清除。");
+};
+
+function setStatus(msg, isError = false) {
+  $("status").textContent = msg;
+  $("status").className = isError ? "error" : "";
+}
+
+// ---------- 拍照 ----------
+$("takePhoto").onclick = () => $("photo").click();
+$("photo").onchange = async (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  if (!getKey()) { $("keyDetails").open = true; setStatus("請先設定 API 金鑰。", true); return; }
+  try {
+    const { dataUrl, base64 } = await shrinkImage(file, 1600);
+    $("preview").src = dataUrl; $("preview").style.display = "block";
+    $("results").innerHTML = ""; $("allActions").classList.add("hidden");
+    $("takePhoto").disabled = true;
+    setStatus("正在讀取照片內容…（約 10–30 秒）");
+    const events = await extractEvents(base64);
+    renderEvents(events);
+    setStatus(events.length ? `找到 ${events.length} 個行程，確認後加入日曆。` : "照片裡沒找到日期或行程。");
+  } catch (err) {
+    console.error(err);
+    setStatus("出錯了：" + err.message, true);
+  } finally {
+    $("takePhoto").disabled = false;
+  }
+};
+
+// 縮小照片，省流量也省費用
+function shrinkImage(file, maxSide) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      const dataUrl = c.toDataURL("image/jpeg", 0.85);
+      URL.revokeObjectURL(img.src);
+      resolve({ dataUrl, base64: dataUrl.split(",")[1] });
+    };
+    img.onerror = () => reject(new Error("無法讀取這張照片"));
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+// ---------- 呼叫 Claude ----------
+const EVENT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["events"],
+  properties: {
+    events: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["title", "start_date", "end_date", "all_day", "start_time", "end_time", "location", "notes", "remind_days_before"],
+        properties: {
+          title: { type: "string", description: "簡短標題，例如「健恆診所 回診」" },
+          start_date: { type: "string", description: "YYYY-MM-DD" },
+          end_date: { type: "string", description: "YYYY-MM-DD，含當天；單日行程與 start_date 相同" },
+          all_day: { type: "boolean" },
+          start_time: { type: "string", description: "HH:MM（24 小時制），全天行程填空字串" },
+          end_time: { type: "string", description: "HH:MM，全天或未知填空字串" },
+          location: { type: "string" },
+          notes: { type: "string", description: "要帶的東西、注意事項、電話、營業時段、不確定之處" },
+          remind_days_before: { type: "integer", description: "建議提前幾天提醒，通常 1" }
+        }
+      }
+    }
+  }
+};
+
+async function extractEvents(base64) {
+  const today = new Date();
+  const todayStr = today.toLocaleDateString("sv-SE"); // YYYY-MM-DD
+  const prompt =
+`今天是 ${todayStr}。這是一張照片（可能是醫院回診單、繳費單、預約卡、通知等）。
+請找出所有需要排進行事曆的行程或期限，用繁體中文填寫。
+- 照片上沒寫年份時，選今天之後最近的那個日期。
+- 「某天之前 3–7 天」這類區間，若照片上有寫出實際日期就用實際日期，做成一個跨日的全天行程。
+- 沒寫明時間就設為全天行程。
+- 地址、電話、要攜帶的物品、時段、是否空腹等都放進 notes。勾選框沒勾的項目，要在 notes 說明「沒勾，建議確認」。
+- 手寫字看不清楚時，在 notes 註明不確定。`;
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": getKey(),
+      "anthropic-version": "2026-10-21",
+      "anthropic-beta": "server-side-fallback-2026-07-01",
+      "anthropic-dangerous-direct-browser-access": "true"
+    },
+    body: JSON.stringify({
+      model: MODEL,
+      max_tokens: 16000,
+      fallbacks: "default",
+      output_config: { effort: "low", format: { type: "json_schema", schema: EVENT_SCHEMA } },
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: "image/jpeg", data: base64 } },
+          { type: "text", text: prompt }
+        ]
+      }]
+    })
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    if (res.status === 401) throw new Error("API 金鑰無效，請重新設定。");
+    if (res.status === 429) throw new Error("請求太頻繁，稍等一下再試。");
+    throw new Error(data?.error?.message || `HTTP ${res.status}`);
+  }
+  if (data.stop_reason === "refusal") throw new Error("這張照片無法處理，換一張試試。");
+  const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
+  return JSON.parse(text).events || [];
+}
+
+// ---------- 顯示與編輯 ----------
+let current = [];
+function renderEvents(events) {
+  current = events;
+  const box = $("results");
+  box.innerHTML = "";
+  events.forEach((ev, i) => {
+    const el = document.createElement("div");
+    el.className = "card event";
+    el.innerHTML = `
+      <h2>行程 ${i + 1}</h2>
+      <label>標題</label><input data-k="title">
+      <div class="row">
+        <div><label>開始日期</label><input type="date" data-k="start_date"></div>
+        <div><label>結束日期</label><input type="date" data-k="end_date"></div>
+      </div>
+      <label class="check"><input type="checkbox" data-k="all_day"> 全天</label>
+      <div class="row times">
+        <div><label>開始時間</label><input type="time" data-k="start_time"></div>
+        <div><label>結束時間</label><input type="time" data-k="end_time"></div>
+      </div>
+      <label>地點</label><input data-k="location">
+      <label>備註</label><textarea data-k="notes"></textarea>
+      <label>提前幾天提醒</label><input type="number" min="0" max="30" data-k="remind_days_before">
+      <div class="actions">
+        <a class="btn" target="_blank" rel="noopener" data-act="google">加入 Google 日曆</a>
+        <button class="secondary" data-act="ics">加入 iPhone 日曆（.ics）</button>
+      </div>`;
+    el.querySelectorAll("[data-k]").forEach(inp => {
+      const k = inp.dataset.k;
+      if (inp.type === "checkbox") inp.checked = !!ev[k]; else inp.value = ev[k] ?? "";
+      inp.addEventListener("input", () => {
+        ev[k] = inp.type === "checkbox" ? inp.checked : inp.type === "number" ? Number(inp.value) : inp.value;
+        refresh();
+      });
+    });
+    const refresh = () => {
+      el.querySelector(".times").style.display = ev.all_day ? "none" : "flex";
+      el.querySelector("[data-act=google]").href = googleUrl(ev);
+    };
+    el.querySelector("[data-act=ics]").onclick = () => downloadIcs([ev], ev.title);
+    refresh();
+    box.appendChild(el);
+  });
+  $("allActions").classList.toggle("hidden", events.length < 2);
+}
+$("downloadAll").onclick = () => downloadIcs(current, "行程");
+
+// ---------- 日期工具 ----------
+const compact = (d) => d.replaceAll("-", "");
+function addDays(dateStr, n) {
+  const d = new Date(dateStr + "T00:00:00");
+  d.setDate(d.getDate() + n);
+  return d.toLocaleDateString("sv-SE");
+}
+function timeOrDefault(t, fallback) { return /^\d{2}:\d{2}$/.test(t || "") ? t : fallback; }
+function eventRange(ev) {
+  const end = ev.end_date || ev.start_date;
+  if (ev.all_day) return { allDay: true, start: compact(ev.start_date), end: compact(addDays(end, 1)) };
+  const st = timeOrDefault(ev.start_time, "09:00");
+  let et = timeOrDefault(ev.end_time, "");
+  if (!et) { const [h, m] = st.split(":").map(Number); et = String(Math.min(h + 1, 23)).padStart(2, "0") + ":" + String(m).padStart(2, "0"); }
+  return { allDay: false, start: compact(ev.start_date) + "T" + st.replace(":", "") + "00", end: compact(end) + "T" + et.replace(":", "") + "00" };
+}
+
+function googleUrl(ev) {
+  const r = eventRange(ev);
+  const p = new URLSearchParams({
+    action: "TEMPLATE", text: ev.title || "", dates: `${r.start}/${r.end}`,
+    details: ev.notes || "", location: ev.location || ""
+  });
+  if (!r.allDay) p.set("ctz", Intl.DateTimeFormat().resolvedOptions().timeZone);
+  return "https://calendar.google.com/calendar/render?" + p.toString();
+}
+
+function icsEscape(s) { return String(s || "").replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n"); }
+function downloadIcs(events, name) {
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+/, "");
+  const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//photo-reminder//zh-TW", "CALSCALE:GREGORIAN"];
+  events.forEach((ev, i) => {
+    const r = eventRange(ev);
+    const days = Number.isFinite(ev.remind_days_before) ? ev.remind_days_before : 1;
+    lines.push("BEGIN:VEVENT",
+      `UID:${stamp}-${i}@photo-reminder`, `DTSTAMP:${stamp}`,
+      r.allDay ? `DTSTART;VALUE=DATE:${r.start}` : `DTSTART:${r.start}`,
+      r.allDay ? `DTEND;VALUE=DATE:${r.end}` : `DTEND:${r.end}`,
+      `SUMMARY:${icsEscape(ev.title)}`, `LOCATION:${icsEscape(ev.location)}`, `DESCRIPTION:${icsEscape(ev.notes)}`);
+    if (days > 0) {
+      // 全天行程：前 N 天早上 9 點；有時間的行程：前 N 天同一時間
+      const trigger = r.allDay ? `-PT${days * 24 - 9}H` : `-P${days}D`;
+      lines.push("BEGIN:VALARM", "ACTION:DISPLAY", `DESCRIPTION:${icsEscape(ev.title)}`, `TRIGGER:${trigger}`, "END:VALARM");
+    }
+    lines.push("BEGIN:VALARM", "ACTION:DISPLAY", `DESCRIPTION:${icsEscape(ev.title)}`, r.allDay ? "TRIGGER:PT8H" : "TRIGGER:-PT1H", "END:VALARM");
+    lines.push("END:VEVENT");
+  });
+  lines.push("END:VCALENDAR");
+  const blob = new Blob([lines.join("\r\n")], { type: "text/calendar;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = (name || "行程") + ".ics";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+</script>
+</body>
+</html>
